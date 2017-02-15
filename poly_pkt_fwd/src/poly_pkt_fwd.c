@@ -275,7 +275,7 @@ static char description[64] = "";                /* used for free form descripti
 /* -------------------------------------------------------------------------- */
 /* --- MAC OSX Extensions  -------------------------------------------------- */
 
-#ifdef __MACH__
+#if defined (__MACH__) && !defined (MAC_OS_X_VERSION_10_12)
 int clock_gettime(int clk_id, struct timespec* t) {
 	(void) clk_id;
 	struct timeval now;
@@ -1525,7 +1525,7 @@ int main(void)
 		MSG("WARNING: Radio is disabled, radio packets cannot be send or received.\n");
 	}
 
-	
+
     /* spawn threads to manage upstream and downstream */
 	if (upstream_enabled == true) {
     i = pthread_create( &thrid_up, NULL, (void * (*)(void *))thread_up, NULL);
@@ -1586,7 +1586,7 @@ int main(void)
     	ghost_start(ghost_addr,ghost_port,reference_coord,gateway_id);
 		MSG("INFO: [main] Ghost listener started, ghost packets can now be received.\n");
     }
-	
+
 	/* Connect to the monitor server */
     if (monitor_enabled == true) {
     	monitor_start(monitor_addr,monitor_port);
@@ -1920,12 +1920,14 @@ int main(void)
 	      { MSG("ERROR: [main] for server %s stalled for %i seconds, terminating packet forwarder.\n", serv_addr[ic], stall_time[ic]);
 			exit(EXIT_FAILURE); } }
 
-	    /* Code of gonzalocasas to catch transient hardware failures */
+	    /* Code of gonzalocasas to catch transient hardware failures, mutex fix by kersing and telkamp */
 		uint32_t trig_cnt_us;
+		pthread_mutex_lock(&mx_concent);
 		if (lgw_get_trigcnt(&trig_cnt_us) == LGW_HAL_SUCCESS && trig_cnt_us == 0x7E000000) {
 			MSG("ERROR: [main] unintended SX1301 reset detected, terminating packet forwarder.\n");
 			exit(EXIT_FAILURE);
 		}
+		pthread_mutex_unlock(&mx_concent);
 	}
 
     /* wait for upstream thread to finish (1 fetch cycle max) */
@@ -3204,7 +3206,7 @@ void thread_gps(void) {
     memset(serial_buff, 0, sizeof serial_buff);
 
 	MSG("INFO: GPS thread activated.\n");
-	
+
     while (!exit_sig && !quit_sig) {
         /* blocking canonical read on serial port */
         nb_char = read(gps_tty_fd, serial_buff, sizeof(serial_buff)-1);
@@ -3278,7 +3280,7 @@ void thread_valid(void) {
     double x;
 
 	MSG("INFO: Validation thread activated.\n");
-	
+
     /* correction debug */
     // FILE * log_file = NULL;
     // time_t now_time;

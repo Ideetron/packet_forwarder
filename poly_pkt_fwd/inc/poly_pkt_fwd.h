@@ -15,9 +15,14 @@
 struct timespec;
 
 #ifdef __MACH__
+#include <AvailabilityMacros.h>
+
+#ifndef MAC_OS_X_VERSION_10_12
 #define CLOCK_REALTIME 0
 #define CLOCK_MONOTONIC 0
 int clock_gettime(int clk_id, struct timespec* t);
+#endif
+
 #endif
 
 double difftimespec(struct timespec end, struct timespec beginning);

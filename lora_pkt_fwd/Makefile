@@ -43,7 +43,7 @@ ifeq ($(CFG_SPI),native)
 else ifeq ($(CFG_SPI),ftdi)
   LIBS := -lloragw -lrt -lpthread -lmpsse -lm
 else ifeq ($(CFG_SPI),mac)
-  $(error [error] Option mac not supported for SPI here)
+  $(error [error] Option mac not supported for SPI here, try 'make mac')
 else
   # keep compatibility with SX1301 HAL version 1.2.x and bellow
   ifeq ($(LGW_PHY),native)
@@ -51,7 +51,7 @@ else
   else ifeq ($(LGW_PHY),ftdi)
     LIBS := -lloragw -lrt -lpthread -lmpsse -lm
   else ifeq ($(LGW_PHY),mac)
-    $(error [error] Option mac not supported for SPI here)
+    $(error [error] Option mac not supported for SPI here, try 'make mac')
   else
     $(error [error] Can't find configuration for SPI phy)
   endif
