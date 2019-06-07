@@ -22,7 +22,7 @@
 /* Note that the ghost receive buffer must be large enough to store the
  * burst of data coming in just after the wait period in the main cycle
  * has commenced. In reality this wait state is one of the limiting factors
- * of the capacity. I am unaware of the number of packates the concentrator
+ * of the capacity. I am unaware of the number of packets the concentrator
  * can store, but my suspicion is 8. In this code the wait state is 10ms,
  * so this limits the maximum throughput in reality on: 8/0.01 = 800 packets/sec.
  * Although in burst mode it may be higher, since the wait time is not the
@@ -34,7 +34,8 @@
 #define GHST_REQ_BUFFSIZE     36     /* Size of buffer held pull requests  */
 #define GHST_RX_BUFFSIZE     320     /* Size of buffer held for receiving packets  */
 #define GHST_TX_BUFFSIZE     320     /* Size of buffer held for sending packets  */
-#define GHST_NM_RCV           12     /* max number of packets to be stored in receive mode, do not exceed 255  */
+#define GHST_NM_RCV           32     /* max number of packets to be stored in receive mode, do not exceed 255  */
+#define GHST_NM_SND           32     /* max number of packets to be stored in send mode, do not exceed 255  */
 #define NODE_CALL_SECS       120     /* Minimum time between calls for ghost nodes, don't hammer the node server. */
 
 /* -------------------------------------------------------------------------- */

@@ -1551,8 +1551,9 @@ int main(void)
     }
 
     // Timer synchronization needed for downstream ...
-    if (gps_active == true || downstream_enabled == true) {
-    	i = pthread_create( &thrid_timersync, NULL, (void * (*)(void *))thread_timersync, NULL);
+    //if (gps_active == true || (downstream_enabled == true && radiostream_enabled == true ) ) {
+    if (radiostream_enabled == true) {
+    	    	i = pthread_create( &thrid_timersync, NULL, (void * (*)(void *))thread_timersync, NULL);
     	if (i != 0) {
     		MSG("ERROR: [main] impossible to create Timer Sync thread\n");
     	exit(EXIT_FAILURE);
@@ -1939,7 +1940,8 @@ int main(void)
     }
     //TODO: Dit heeft nawerk nodig
     pthread_cancel(thrid_jit); /* don't wait for jit thread */
-    if (gps_active == true) pthread_cancel(thrid_timersync); /* don't wait for timer sync thread */
+    //if (gps_active == true) pthread_cancel(thrid_timersync); /* don't wait for timer sync thread */
+    if (radiostream_enabled == true) pthread_cancel(thrid_timersync); /* don't wait for timer sync thread */
 
 	if (ghoststream_enabled == true) ghost_stop();
 	if (monitor_enabled == true) monitor_stop();
@@ -3108,6 +3110,7 @@ void print_tx_status(uint8_t tx_status) {
 
 void thread_jit(void) {
     int result = LGW_HAL_SUCCESS;
+    bool gh_result = false;
     struct lgw_pkt_tx_s pkt;
     int pkt_index = -1;
     struct timeval current_unix_time;
@@ -3135,6 +3138,14 @@ void thread_jit(void) {
                         meas_nb_beacon_sent += 1;
                         pthread_mutex_unlock(&mx_meas_dw);
                     }
+
+                    /* Check if we have a ghost stream activated, if so, send the down packet to the ghost nodes */
+                    if (ghoststream_enabled == true)
+                    { gh_result = ghost_put(&pkt);
+                      if (gh_result == false) LOGGER("ERROR: ghost down packet not added to send buffer\n"); }
+
+                    /* The there is no radio stream we need not to contact the concentrator. */
+                    if (radiostream_enabled == true) {
 
                     /* check if concentrator is free for sending new packet */
                     result = lgw_status(TX_STATUS, &tx_status);
@@ -3168,7 +3179,7 @@ void thread_jit(void) {
                         meas_nb_tx_ok += 1;
                         pthread_mutex_unlock(&mx_meas_dw);
                         MSG_DEBUG(DEBUG_PKT_FWD, "lgw_send done: count_us=%u\n", pkt.count_us);
-                    }
+                    } }
                 } else {
                 	LOGGER("ERROR: jit_dequeue failed with %d\n", jit_result);
                 }

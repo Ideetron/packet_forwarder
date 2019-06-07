@@ -26,5 +26,6 @@ int clock_gettime(int clk_id, struct timespec* t);
 #endif
 
 double difftimespec(struct timespec end, struct timespec beginning);
+int get_concentrator_time(struct timeval *concent_time, struct timeval unix_time);
 
 #endif /* _POLY_PKT_FWD_H_ */

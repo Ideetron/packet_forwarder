@@ -44,8 +44,10 @@
 /* --- PRIVATE MACROS ------------------------------------------------------- */
 
 //#define MSG(args...)    printf(args) /* message that is destined to the user */ => moved to trace.h
-#define PROTOCOL_VERSION    2
-#define GHOST_DATA         11
+#define PROTOCOL_VERSION       2
+#define GHOST_PRQ_DATA        11
+#define GHOST_UP_DATA         11
+#define GHOST_DOWN_DATA       12
 
 extern bool logger_enabled;
 
@@ -59,12 +61,15 @@ static pthread_mutex_t cb_ghost = PTHREAD_MUTEX_INITIALIZER; /* control access t
 //!static int txpktSize = sizeof(struct lgw_pkt_tx_s);
 
 static uint8_t buffRX[GHST_RX_BUFFSIZE*GHST_NM_RCV]; /* circular buffer for receiving packets */
-//!static uint8_t buffTX[GHST_TX_BUFFSIZE*GHST_NM_RCV]; /* circular buffer for sending packets */
+static uint8_t buffTX[GHST_TX_BUFFSIZE*GHST_NM_SND]; /* circular buffer for sending packets */
 
-static uint8_t ghst_end;                 /* end of circular packet buffer  */
-static uint8_t ghst_bgn;                 /* begin of circular packet buffer */
+static uint8_t ghst_rcv_end;                 /* end of receive circular packet buffer  */
+static uint8_t ghst_rcv_bgn;                 /* begin of receive circular packet buffer */
 
-static int sock_ghost; /* socket for downstream traffic */
+static uint8_t ghst_snd_end;                 /* end of send circular packet buffer  */
+static uint8_t ghst_snd_bgn;                 /* begin of send circular packet buffer */
+
+static int sock_ghost; /* socket for ghost traffic */
 static char gateway_id[16]  = ""; /* string form of gateway mac address */
 
 /* ghost thread */
@@ -122,11 +127,11 @@ static float eflt(uint8_t *p, uint8_t i)
   return uf.f; }
 
 /* Method to fill lgw_pkt_rx_s with data received by the ghost node server. */
-static void readRX(struct lgw_pkt_rx_s *p, uint8_t *b)
+static void readRX(struct lgw_pkt_rx_s *p, uint8_t *b, uint32_t time_us)
 { p->freq_hz    = u32(b,0);
   p->if_chain   =  u8(b,4);
   p->status     =  u8(b,5);
-  p->count_us   = u32(b,6);
+  p->count_us   =  time_us;
   p->rf_chain   =  u8(b,10);
   p->modulation =  u8(b,11);
   p->bandwidth  =  u8(b,12);
@@ -139,6 +144,10 @@ static void readRX(struct lgw_pkt_rx_s *p, uint8_t *b)
   p->crc        = u16(b,34);
   p->size       = u16(b,36);
   memcpy((p->payload),&b[38],p->size); }
+
+static uint16_t sizeTX(struct lgw_pkt_tx_s *pkt)
+{ return sizeof(struct lgw_pkt_tx_s) - 256 + (pkt->size); }
+
 
 static void thread_ghost(void);
 
@@ -170,7 +179,7 @@ void ghost_start(const char * ghost_addr, const char * ghost_port, const struct 
     /* Get the credentials for this server. */
     i = getaddrinfo(ghost_addr, ghost_port, &addresses, &result);
     if (i != 0)
-    { MSG("ERROR: [up] getaddrinfo on address %s (PORT %s) returned %s\n", ghost_addr, ghost_port, gai_strerror(i));
+    { MSG("ERROR: [ghost] getaddrinfo on address %s (PORT %s) returned %s\n", ghost_addr, ghost_port, gai_strerror(i));
       exit(EXIT_FAILURE); }
 
     /* try to open socket for ghost listener */
@@ -181,31 +190,33 @@ void ghost_start(const char * ghost_addr, const char * ghost_port, const struct 
 
     /* See if the connection was a success, if not, this is a permanent failure */
     if (q == NULL)
-    { MSG("ERROR: [down] failed to open socket to any of server %s addresses (port %s)\n", ghost_addr, ghost_port);
+    { MSG("ERROR: [ghost] failed to open socket to any of server %s addresses (port %s)\n", ghost_addr, ghost_port);
       i = 1;
       for (q=result; q!=NULL; q=q->ai_next)
       { getnameinfo(q->ai_addr, q->ai_addrlen, host_name, sizeof host_name, port_name, sizeof port_name, NI_NUMERICHOST);
-        MSG("INFO: [down] result %i host:%s service:%s\n", i, host_name, port_name);
+        MSG("INFO: [ghost] result %i host:%s service:%s\n", i, host_name, port_name);
         ++i; }
       exit(EXIT_FAILURE); }
 
     /* connect so we can send/receive packet with the server only */
     i = connect(sock_ghost, q->ai_addr, q->ai_addrlen);
     if (i != 0) {
-        MSG("ERROR: [down] connect returned %s\n", strerror(errno));
+        MSG("ERROR: [ghost] connect returned %s\n", strerror(errno));
         exit(EXIT_FAILURE); }
 
     freeaddrinfo(result);
 
     /* set the circular buffer pointers to the beginning */
-    ghst_bgn = 0;
-    ghst_end = 0;
+    ghst_rcv_bgn = 0;
+    ghst_rcv_end = 0;
+    ghst_snd_bgn = 0;
+    ghst_snd_end = 0;
 
     /* spawn thread to manage ghost connection */
     ghost_run = true;
     i = pthread_create( &thrid_ghost, NULL, (void * (*)(void *))thread_ghost, NULL);
     if (i != 0)
-    { MSG("ERROR: [main] impossible to create ghost thread\n");
+    { MSG("ERROR: [ghost] impossible to create ghost thread\n");
       exit(EXIT_FAILURE); }
 
     /* We are done here, ghost thread is initialized and should be running by now. */
@@ -215,7 +226,7 @@ void ghost_start(const char * ghost_addr, const char * ghost_port, const struct 
 
 void ghost_stop(void)
 {   ghost_run = false;                /* terminate the loop. */
-    pthread_cancel(thrid_ghost);      /* don't wait for downstream thread (is this okay??) */
+    pthread_cancel(thrid_ghost);      /* don't wait for ghost thread (is this okay??) */
     shutdown(sock_ghost, SHUT_RDWR);  /* close the socket. */
 }
 
@@ -225,26 +236,37 @@ void ghost_stop(void)
 int ghost_get(int max_pkt, struct lgw_pkt_rx_s *pkt_data)
 {   /* Calculate the number of available packets */
     pthread_mutex_lock(&cb_ghost);
-    uint8_t avail = (ghst_bgn - ghst_end + GHST_NM_RCV) % GHST_NM_RCV;
+    uint8_t avail = (ghst_rcv_bgn - ghst_rcv_end + GHST_NM_RCV) % GHST_NM_RCV;
     pthread_mutex_unlock(&cb_ghost);
 
     /* Calculate the number of packets that we may or can copy */
     uint8_t get_pkt = (avail<max_pkt) ? avail : max_pkt;
 
+    /* timestamp the incomming packets as if they came over the air. */
+    //TODO: The timestamp should actually be given at entrance. But the difference is small,
+    //      and so multiple packets can be stamped at once.
+    uint32_t time_us = 0;
+    if (get_pkt > 0)
+    { struct timeval current_unix_time;
+      struct timeval current_concentrator_time;
+      gettimeofday(&current_unix_time, NULL);
+      get_concentrator_time(&current_concentrator_time, current_unix_time);
+      time_us = (uint32_t) (current_concentrator_time.tv_sec * 1000000UL + current_concentrator_time.tv_usec); }
+
     /* Do the actual copying, take into account that the read buffer is circular. */
     int i;
     for (i=0; i<get_pkt; i++)
-    { int ind = (ghst_end + i) % GHST_NM_RCV;
-      readRX(&pkt_data[i],(buffRX+ind*GHST_RX_BUFFSIZE)); }
+    { int ind = (ghst_rcv_end + i) % GHST_NM_RCV;
+      readRX(&pkt_data[i],(buffRX+ind*GHST_RX_BUFFSIZE),time_us); }
 
     /* Shift the end index of the read buffer to the new position. */
     pthread_mutex_lock(&cb_ghost);
-    ghst_end = (ghst_end + get_pkt) % GHST_NM_RCV;
+    ghst_rcv_end = (ghst_rcv_end + get_pkt) % GHST_NM_RCV;
     pthread_mutex_unlock(&cb_ghost);
 
-    if (get_pkt>0)
-    { LOGGER("INFO: copied %i packets from ghost, ghst_end  = %i \n",get_pkt,ghst_end);
-      // To get more info enable this
+    // To get more info enable this
+    if (false && (get_pkt>0))
+    { LOGGER("INFO: copied %i packets from ghost, ghst_rcv_end  = %i \n",get_pkt,ghst_rcv_end);
       //for (i=0; i<get_pkt; i++)
       //{ printf("packet %i\n",i);
       //  printRX(&pkt_data[i]); }
@@ -254,11 +276,40 @@ int ghost_get(int max_pkt, struct lgw_pkt_rx_s *pkt_data)
     return get_pkt; }
 
 
-/* Call this to push data from the server to the receiving ghost node.
- * Data is send immediately. */
-int ghost_put()
-{   //TODO: Implement this method.
-    return 0; }
+/* Call this to push data from the server to the receiving ghost node. */
+int ghost_put(struct lgw_pkt_tx_s *pkt)
+{ /* aux variable for data copy */
+  int  next;
+  int  offset;
+  bool full;
+
+  /* Determine the next pointer where data can be written and see if the circular buffer is full */
+  next  =  (ghst_snd_bgn + 1) % GHST_NM_RCV;
+  pthread_mutex_lock(&cb_ghost);
+  full  =  next == ghst_snd_end;
+  pthread_mutex_unlock(&cb_ghost);
+
+  /* Calculate index where to place the data */
+  offset = ghst_snd_bgn*GHST_TX_BUFFSIZE;
+
+  /* Add identification part */
+  buffTX[offset] = PROTOCOL_VERSION;
+  buffTX[offset+1] = 0;  // reserved for future use
+  buffTX[offset+2] = 0;  // reserved for future use
+  buffTX[offset+3] = GHOST_DOWN_DATA;
+
+  /* make a copy to the data received to the circular buffer, and shift the write index. */
+  if (full)
+  { return false; }
+  else
+  { memcpy((void *)(buffTX+offset+4),pkt,sizeof(struct lgw_pkt_tx_s));
+	pthread_mutex_lock(&cb_ghost);
+	ghst_snd_bgn = next;
+	pthread_mutex_unlock(&cb_ghost);
+	LOGGER("INFO, enqueued packet for downstream");
+    return true; }
+
+}
 
 static void thread_ghost(void)
 {   int i; /* loop variable */
@@ -270,11 +321,11 @@ static void thread_ghost(void)
     struct timespec recv_time; /* time of return from recv socket call */
 
     /* data buffers */
-    uint8_t buff_down[GHST_MIN_PACKETSIZE+GHST_RX_BUFFSIZE]; /* buffer to receive downstream packets */
+    uint8_t buff_up[GHST_MIN_PACKETSIZE+GHST_RX_BUFFSIZE]; /* buffer to receive upstream packets */
     uint8_t buff_req[GHST_REQ_BUFFSIZE]; /* buffer to compose pull requests */
     int msg_len;
 
-    /* set downstream socket RX timeout */
+    /* set ghoststream socket RX timeout */
     i = setsockopt(sock_ghost, SOL_SOCKET, SO_RCVTIMEO, (void *)&ghost_timeout, sizeof ghost_timeout);
     if (i != 0)
     { MSG("ERROR: [ghost] setsockopt returned %s\n", strerror(errno));
@@ -290,7 +341,7 @@ static void thread_ghost(void)
     buff_req[0] = PROTOCOL_VERSION;
     buff_req[1] = 0;  // reserved for future use
     buff_req[2] = 0;  // reserved for future use
-    buff_req[3] = GHOST_DATA;
+    buff_req[3] = GHOST_PRQ_DATA;
 
     /* Add the gateway id to the request */
     memcpy(&buff_req[4],&gateway_id, sizeof gateway_id);
@@ -302,6 +353,8 @@ static void thread_ghost(void)
     /* aux variable for data copy */
     int  next;
     bool full;
+    uint8_t avail;
+    struct lgw_pkt_tx_s *dwn_pkt;
 
     while (ghost_run)
     {   /* send PULL request and record time */
@@ -315,37 +368,60 @@ static void thread_ghost(void)
         recv_time = send_time;
         while ((int)difftimespec(recv_time, send_time) < NODE_CALL_SECS)
         {   /* try to receive a datagram */
-            msg_len = recv(sock_ghost, (void *)buff_down, (sizeof buff_down)-1, 0);
+            msg_len = recv(sock_ghost, (void *)buff_up, (sizeof buff_up)-1, 0);
             clock_gettime(CLOCK_MONOTONIC, &recv_time);
 
             /* The protocol requires renewal of the subscription on regular basis. So we do
              * not reset the wait time force a new pull request every NODE_CALL_SECS.
-             * If we are here because of a timeout, try again.*/
-            if (msg_len < 0) { continue; }
+             * If we are here because of a timeout, try again, but first, inspect the
+             * down message queue */
+            if (msg_len < 0)
+            { /* Calculate the number of available packets */
+              pthread_mutex_lock(&cb_ghost);
+              avail = (ghst_snd_bgn - ghst_snd_end + GHST_NM_SND) % GHST_NM_SND;
+              pthread_mutex_unlock(&cb_ghost);
 
-            /* if the datagram does not respect protocol, just ignore it */
-            if ((msg_len < 4 + GHST_MIN_PACKETSIZE) || (msg_len > 4 + GHST_RX_BUFFSIZE) || (buff_down[0] != PROTOCOL_VERSION) || ((buff_down[3] != GHOST_DATA) ))
-            { LOGGER("WARNING: [ghost] ignoring invalid packet len=%d, protocol_version=%d, id=%d\n", msg_len, buff_down[0], buff_down[3]);
+              /* Send one packet, take into account that the read buffer is circular. */
+              if (avail > 0)
+              { int blockSize = (ghst_snd_end % GHST_NM_SND)*GHST_TX_BUFFSIZE;
+                dwn_pkt = (struct lgw_pkt_tx_s *) (buffTX+blockSize+4);
+
+                /* Send may actually return -1 if it fails. We do not try again, the packet is lost. */
+                // TODO: +2 seems correct (transmits the correct number of payload bytes), but why is +4 two too many???
+                send(sock_ghost, (void *)(buffTX+blockSize), sizeTX(dwn_pkt)+2, 0);
+
+                /* Shift the end index of the read buffer to the new position.
+                 * In the mean time other packets could have been added. */
+                pthread_mutex_lock(&cb_ghost);
+                ghst_snd_end = (ghst_snd_end + 1) % GHST_NM_SND;
+                pthread_mutex_unlock(&cb_ghost); }
+
+              /* We are done, try to read some packets again. */
               continue; }
 
-            /* the datagram is a GHOST_DATA */
-            buff_down[msg_len] = 0; /* add string terminator, just to be safe */
+            /* if the datagram does not respect protocol, just ignore it */
+            if ((msg_len < 4 + GHST_MIN_PACKETSIZE) || (msg_len > 4 + GHST_RX_BUFFSIZE) || (buff_up[0] != PROTOCOL_VERSION) || ((buff_up[3] != GHOST_UP_DATA) ))
+            { LOGGER("WARNING: [ghost] ignoring invalid packet len=%d, protocol_version=%d, id=%d\n", msg_len, buff_up[0], buff_up[3]);
+              continue; }
+
+            /* The datagram is a GHOST_DATA, add string terminator, just to be safe */
+            buff_up[msg_len] = 0;
 
             /* Determine the next pointer where data can be written and see if the circular buffer is full */
-            next  =  (ghst_bgn + 1) % GHST_NM_RCV;
+            next  =  (ghst_rcv_bgn + 1) % GHST_NM_RCV;
             pthread_mutex_lock(&cb_ghost);
-            full  =  next == ghst_end;
+            full  =  next == ghst_rcv_end;
             pthread_mutex_unlock(&cb_ghost);
 
             /* make a copy to the data received to the circular buffer, and shift the write index. */
             if (full)
             {  LOGGER("WARNING: [ghost] buffer is full, dropping packet)\n"); }
             else
-            {  memcpy((void *)(buffRX+ghst_bgn*GHST_RX_BUFFSIZE),buff_down+4,msg_len-3);
+            {  memcpy((void *)(buffRX+ghst_rcv_bgn*GHST_RX_BUFFSIZE),buff_up+4,msg_len-3);
                pthread_mutex_lock(&cb_ghost);
-               ghst_bgn = next;
+               ghst_rcv_bgn = next;
                pthread_mutex_unlock(&cb_ghost);
-               LOGGER("RECEIVED, [ghost] ghst_bgn = %i \n", ghst_bgn); } } }
+               LOGGER("RECEIVED, [ghost] ghst_rcv_bgn = %i \n", ghst_rcv_bgn); } } }
 
     MSG("\nINFO: End of ghost thread\n");
 }
