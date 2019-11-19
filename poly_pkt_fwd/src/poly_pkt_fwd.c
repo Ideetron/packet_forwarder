@@ -763,11 +763,13 @@ static int parse_gateway_configuration(const char * conf_file) {
 		serv_count = ic;
 	} else {
 		/* If there are no servers in server array fall back to old fashioned single server definition.
-		 * The difference with the original situation is that we require a complete definition. */
+		 * The difference with the original situation is that we require a complete definition, except
+		 * for the stall, that is optional (defaults to zero) */
     /* server hostname or IP address (optional) */
     str = json_object_get_string(conf_obj, "server_address");
 		val1 = json_object_get_value(conf_obj, "serv_port_up");
 		val2 = json_object_get_value(conf_obj, "serv_port_down");
+		val3 = json_object_get_value(conf_obj, "serv_max_stall");
 		if ((str != NULL) && (val1 != NULL) && (val2 != NULL)) {
 			serv_count = 1;
 			serv_live[0] = false;
@@ -776,6 +778,7 @@ static int parse_gateway_configuration(const char * conf_file) {
 			snprintf(serv_port_down[0], sizeof serv_port_down[0], "%u", (uint16_t)json_value_get_number(val2));
 			MSG("INFO: Server configured to \"%s\", with port up \"%s\" and port down \"%s\"\n", serv_addr[0],serv_port_up[0],serv_port_down[0]);
 		}
+		if (val3 != NULL) serv_max_stall[0] = (int) json_value_get_number(val3); else serv_max_stall[0] = 0;
 	}
 
 
